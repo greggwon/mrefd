@@ -41,6 +41,12 @@ else
 CFLAGS += -DNO_DHT
 endif
 
+# TLS interlink support (framing.cpp, birth.cpp, and the tlsserver/tlsclient
+# classes) links directly against OpenSSL. libssl is already pulled in via
+# OpenDHT when DHT=true, but framing/birth are always built (the file glob
+# picks them up), so we always link -lssl -lcrypto explicitly.
+LDFLAGS += -lssl -lcrypto
+
 ifeq ($(DAEMON), true)
 CFLAGS += -DRUN_AS_DAEMON
 endif

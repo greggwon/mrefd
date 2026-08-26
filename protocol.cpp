@@ -323,45 +323,7 @@ void CProtocol::Task(void)
 		}
 		break;
 	default:
-		if (len > sizeof(SInterConnect))
-		{
-			CCallsign dst, src;
-			auto client = GetClient(ip, len, pack, dst, src);
-			if (client)
-			{
-				// std::cout << "Data:" << (pack.IsStreamData()?"Stream":"Packet") << " Module:" << mod << " Client:" << client->GetCallsign() << " SRC:" << src << " IP:" << ip << std::endl;
-				//  make sure the SRC callsign is not blacklisted
-				if (g_GateKeeper.MayTransmit(src, ip))
-				{
-					// might open a new stream if it's the first packet
-					// if there is a problem, return false
-					if (OnPacketIn(pack, client))
-					{
-						if (0 == ((0x7fffu & pack.GetFrameNumber()) % 6))
-							UpdateDashData(src, dst, client, pack);
-						SendToClients(pack, client, dst);
-						if (pack.IsStreamData() and pack.IsLastPacket())
-						{
-							CloseStream(client->GetReflectorModule()); // so this only closes streams
-						}
-					}
-				}
-				else if (pack.IsStreamData())
-				{
-					// this voicestream is blocked, so
-					if (pack.GetFrameNumber() & 0x8000u)
-					{
-						// when the stream closes, log it.
-						std::cout << "Blocked voice stream from " << src << " at " << ip << std::endl;
-					}
-				}
-				else
-				{
-					// here is a blocked PM packet
-					std::cout << "Blocked Packet from " << src << " at " << ip << std::endl;
-				}
-			}
-		}
+		ProcessDataPacket(pack, len, ip);
 		break;
 	}
 
@@ -565,6 +527,114 @@ unsigned CProtocol::ReceiveDS(uint8_t *buf, CIp &ip, int time_ms)
 		return m_Socket4.ReceiveFrom(buf, ip);
 	else
 		return m_Socket6.ReceiveFrom(buf, ip);
+}
+
+////////////////////////////////////////////////////////////////////////////////////////
+// pluggable outbound routing (used by the TLS interlink layer)
+
+void CProtocol::RegisterSender(const std::string &callsign, TSendMapped sender)
+{
+	std::lock_guard<std::mutex> lock(m_SenderMutex);
+	m_SenderMap[callsign] = std::move(sender);
+}
+
+void CProtocol::UnregisterSender(const std::string &callsign)
+{
+	std::lock_guard<std::mutex> lock(m_SenderMutex);
+	m_SenderMap.erase(callsign);
+}
+
+bool CProtocol::TrySendMapped(const std::string &callsign,
+                              const uint8_t *buf, size_t size) const
+{
+	TSendMapped s;
+	{
+		std::lock_guard<std::mutex> lock(m_SenderMutex);
+		auto it = m_SenderMap.find(callsign);
+		if (it == m_SenderMap.end())
+			return false;
+		s = it->second;   // copy the closure so we can release the lock
+	}
+	// Call outside the lock so slow / blocking writes (SSL_write, etc.)
+	// don't serialize the whole outbound path.
+	return s(buf, size);
+}
+
+void CProtocol::ProcessDataPacket(CPacket &pack, unsigned len, const CIp &ip)
+{
+	// Byte-for-byte the block previously inlined in Task()'s default case.
+	// Called from Task() for real UDP receives, and from the TLS interlink
+	// read loop when M17_STREAM / M17_PACKET frames arrive on an
+	// authenticated session (the payload after the msg_type byte is the
+	// same on-the-wire M17 packet body).
+	if (len > sizeof(SInterConnect))
+	{
+		CCallsign dst, src;
+		auto client = GetClient(ip, len, pack, dst, src);
+		if (client)
+		{
+			// std::cout << "Data:" << (pack.IsStreamData()?"Stream":"Packet") << " Module:" << mod << " Client:" << client->GetCallsign() << " SRC:" << src << " IP:" << ip << std::endl;
+			//  make sure the SRC callsign is not blacklisted
+			if (g_GateKeeper.MayTransmit(src, ip))
+			{
+				// might open a new stream if it's the first packet
+				// if there is a problem, return false
+				if (OnPacketIn(pack, client))
+				{
+					if (0 == ((0x7fffu & pack.GetFrameNumber()) % 6))
+						UpdateDashData(src, dst, client, pack);
+					SendToClients(pack, client, dst);
+					if (pack.IsStreamData() and pack.IsLastPacket())
+					{
+						CloseStream(client->GetReflectorModule()); // so this only closes streams
+					}
+				}
+			}
+			else if (pack.IsStreamData())
+			{
+				// this voicestream is blocked, so
+				if (pack.GetFrameNumber() & 0x8000u)
+				{
+					// when the stream closes, log it.
+					std::cout << "Blocked voice stream from " << src << " at " << ip << std::endl;
+				}
+			}
+			else
+			{
+				// here is a blocked PM packet
+				std::cout << "Blocked Packet from " << src << " at " << ip << std::endl;
+			}
+		}
+	}
+}
+
+void CProtocol::AddInterlinkPeerClients(const CCallsign &identity,
+                                        const CIp &ip,
+                                        const std::string &mods)
+{
+	const CUdpSocket &sock = (ip.GetFamily() == AF_INET6) ? m_Socket6 : m_Socket4;
+	auto clients = g_Reflector.GetClients();
+	for (char m : mods)
+	{
+		clients->AddClient(
+			std::make_shared<CClient>(identity, ip, EClientType::reflector, m, sock));
+	}
+	g_Reflector.ReleaseClients();
+}
+
+void CProtocol::RemoveInterlinkPeerClients(const CCallsign &identity)
+{
+	auto clients = g_Reflector.GetClients();
+	// Snapshot matching clients first so we don't mutate while iterating.
+	std::vector<SPClient> to_remove;
+	for (auto &c : *clients)
+	{
+		if (c && c->GetCallsign() == identity)
+			to_remove.push_back(c);
+	}
+	for (auto &c : to_remove)
+		clients->RemoveClient(c);
+	g_Reflector.ReleaseClients();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////

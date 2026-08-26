@@ -55,6 +55,10 @@ public:
 	// peers
 	CPeers   &GetPeers(void)                        { return m_Peers; }
 
+	// protocol - exposed so the TLS interlink layer can register per-callsign
+	// sender overrides via CProtocol::RegisterSender().
+	CProtocol &GetProtocol(void)                    { return m_Protocol; }
+
 	// users
 	CUsers  *GetUsers(void)                         { m_Users.Lock(); return &m_Users; }
 	void    ReleaseUsers(void)                      { m_Users.Unlock(); }
