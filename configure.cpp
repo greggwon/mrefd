@@ -146,6 +146,7 @@ bool CConfigure::ReadData(const std::string &path)
 	std::string line, mods, emods;
 	while (std::getline(cfg, line)) {
 		trim(line);
+		std::cout << "Next config line: " << line << std::endl;
 
 		if (0==line.size())
 			continue;	// skip empty lines
