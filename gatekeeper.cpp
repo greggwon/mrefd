@@ -30,6 +30,7 @@
 #include "gatekeeper.h"
 #include "configure.h"
 #include "interlinks.h"
+#include "tlsinterlinks.h"
 
 extern CReflector g_Reflector;
 extern CConfigure g_CFG;
@@ -138,6 +139,8 @@ void CGateKeeper::Thread()
 		if ( g_Interlinks.NeedReload() )
 		{
 			g_Interlinks.ReloadFromFile();
+			// Refresh the TLS server's peer-registry snapshot too.
+			g_TLSInterlinks.Reload();
 		}
 	}
 }

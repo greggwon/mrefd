@@ -31,8 +31,10 @@
 #include "defines.h"
 #include "client.h"
 #include "configure.h"
+#include "reflector.h"
 
 extern CConfigure g_CFG;
+extern CReflector g_Reflector;
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // constructors
@@ -72,7 +74,14 @@ bool CClient::operator ==(const CClient &client) const
 void CClient::SendPacket(const CPacket &pack) const
 {
 	auto size = pack.GetSize();
-	m_Sock.Send(pack.GetCData(), size, m_Ip);
+	// Pluggable outbound routing: if the TLS interlink layer (or any
+	// future transport) has registered a sender for this callsign, use
+	// that; otherwise fall through to the default UDP path unchanged.
+	if (!g_Reflector.GetProtocol().TrySendMapped(
+	        m_Callsign.GetCS(), pack.GetCData(), size))
+	{
+		m_Sock.Send(pack.GetCData(), size, m_Ip);
+	}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////

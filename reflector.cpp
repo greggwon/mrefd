@@ -34,6 +34,7 @@
 #include "configure.h"
 #include "version.h"
 #include "interlinks.h"
+#include "tlsinterlinks.h"
 
 CReflector g_Reflector;
 extern CGateKeeper g_GateKeeper;
@@ -129,6 +130,45 @@ bool CReflector::Start(const char *cfgfilename)
 		return true;
 	}
 
+	// Start the TLS interlink layer if the interlink file had any TLS
+	// entries. Config paths for the TLS server/client identities come from
+	// environment variables in the 5a stage; a future change adds them to
+	// mrefd.cfg via configure.cpp.
+	{
+		auto env = [](const char *k) -> std::string {
+			const char *v = std::getenv(k);
+			return v ? std::string(v) : std::string();
+		};
+		std::string tls_bind = env("MREFD_TLS_BIND_ADDR");
+		if (tls_bind.empty()) tls_bind = g_CFG.GetIPv6BindAddr();
+		if (tls_bind.empty()) tls_bind = "0.0.0.0";
+
+		uint16_t tls_port = static_cast<uint16_t>(g_CFG.GetPort());
+		if (const char *pstr = std::getenv("MREFD_TLS_PORT"))
+		{
+			try { tls_port = static_cast<uint16_t>(std::stoul(pstr)); }
+			catch (...) { }
+		}
+
+		uint32_t skew = 300;
+		if (const char *sstr = std::getenv("MREFD_TLS_TIMESTAMP_SKEW"))
+		{
+			try { skew = static_cast<uint32_t>(std::stoul(sstr)); }
+			catch (...) { }
+		}
+
+		if (g_TLSInterlinks.Init(env("MREFD_TLS_SERVER_CERT"),
+		                         env("MREFD_TLS_SERVER_KEY"),
+		                         env("MREFD_TLS_CLIENT_CERT"),
+		                         env("MREFD_TLS_CLIENT_KEY"),
+		                         tls_port,
+		                         tls_bind,
+		                         skew))
+		{
+			std::cout << "TLS interlink layer active." << std::endl;
+		}
+	}
+
 	// start the reporting threads
 	std::cout << "Starting the XML thread..." << std::endl;
 	m_JsonReportFuture = std::async(std::launch::async, &CReflector::DashboardDataThread, this);
@@ -143,6 +183,10 @@ void CReflector::Stop(void)
 {
 	// stop & delete all threads
 	keep_running = false;
+
+	// stop the TLS interlink layer before anything else so its threads are
+	// joined while the rest of mrefd's globals are still valid.
+	g_TLSInterlinks.Stop();
 
 	// stop & delete report threads
 	if ( m_JsonReportFuture.valid() )

@@ -26,7 +26,9 @@
 #pragma once
 
 #include <atomic>
+#include <functional>
 #include <future>
+#include <mutex>
 #include <unordered_map>
 #include <regex>
 
@@ -36,6 +38,12 @@
 #include "packet.h"
 #include "parrot.h"
 #include "base.h"
+
+// Signature for a per-callsign outbound sender. Return true on success;
+// false lets the caller fall back to the default UDP send path.
+// Used by the TLS interlink layer to redirect writes destined for a
+// TLS-authenticated peer into the peer's SSL session.
+using TSendMapped = std::function<bool(const uint8_t *buf, size_t size)>;
 
 
 using SInterConnect = struct __attribute__((__packed__)) interconnect_tag {
@@ -63,6 +71,36 @@ public:
 	// task
 	void Thread(void);
 	void Task(void);
+
+	// -- pluggable outbound routing ------------------------------------
+	// Any registered sender is consulted before the default UDP send.
+	// An empty map (the default) preserves the pre-existing UDP behavior
+	// exactly. Callsigns keyed as the printable "GetCS()" form so no
+	// hash/less specialization for CCallsign is required.
+	void RegisterSender  (const std::string &callsign, TSendMapped sender);
+	void UnregisterSender(const std::string &callsign);
+	// Returns true if a mapped sender handled the write; false = caller
+	// should fall through to UDP.
+	bool TrySendMapped(const std::string &callsign,
+	                   const uint8_t *buf, size_t size) const;
+
+	// Register / unregister CClient entries in g_Reflector.GetClients() for
+	// a TLS-authenticated peer. Called by the TLS interlink layer at BIRTH
+	// time (add) and session-close time (remove). Uses this protocol's own
+	// UDP sockets as the CClient socket reference; actual writes are
+	// diverted via the sender map (RegisterSender above), so the socket
+	// reference is never used for a TLS peer.
+	void AddInterlinkPeerClients   (const CCallsign &identity,
+	                                const CIp &ip,
+	                                const std::string &mods);
+	void RemoveInterlinkPeerClients(const CCallsign &identity);
+
+	// Process one already-received M17 data packet (Stream Mode or Packet
+	// Mode) exactly as if it arrived over UDP. Called from Task() for real
+	// UDP receives and from the TLS interlink layer when an M17_STREAM /
+	// M17_PACKET frame arrives on an authenticated session (payload after
+	// the msg_type byte is the same on-the-wire M17 packet body).
+	void ProcessDataPacket(CPacket &pack, unsigned len, const CIp &ip);
 
 protected:
 	// queue helper
@@ -139,4 +177,7 @@ protected:
 private:
 	std::regex clientRegEx, peerRegEx, lstnRegEx;
 	std::unordered_map<SPClient, std::unique_ptr<CParrot>> parrotMap;
+
+	mutable std::mutex                            m_SenderMutex;
+	std::unordered_map<std::string, TSendMapped>  m_SenderMap;
 };
