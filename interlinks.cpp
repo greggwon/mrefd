@@ -34,6 +34,7 @@
 
 #include "configure.h"
 #include "interlinks.h"
+#include "birth.h"
 
 // the global object
 CInterlinks g_Interlinks;
@@ -180,14 +181,16 @@ bool CInterlinks::LoadFromFile(const char *filename)
 // Parse a TLS-form line. The token vector is one of:
 //
 //   Home-side (accept incoming):
-//       IDENT  MODS  key:/path/to/peer.pem
+//       CALLSIGN  MODS  key:/path/to/operator.pem
+//   CALLSIGN is the operator's bare callsign (e.g. "W5GGW") and must be the
+//   cert's Subject CN; MODS are the modules that operator's nodes may assert.
 //
 //   Field-side (initiate outbound):
-//       IDENT  MODS  tls:host:port  servercert:/path/to/server.pem
+//       NAME  MODULE  tls:host:port  servercert:/path/to/server.pem
+//   NAME labels the hub (e.g. "M17-HOM"); MODULE is the single letter this
+//   node asserts, so the hub names us "<our cert CN>-<MODULE>".
 //
-// where IDENT is "callsign-module" (e.g. "W5GGW-B") and MODS is a string
-// of uppercase A-Z letters. Token order is not fixed; we sniff each token
-// for its role by prefix.
+// Token order is not fixed; we sniff each token for its role by prefix.
 void CInterlinks::ParseTLSLine(const std::vector<std::string> &tokens, unsigned line_no)
 {
 	std::string identity, modules, keyfile, tls_endpoint, servercert;
@@ -208,27 +211,41 @@ void CInterlinks::ParseTLSLine(const std::vector<std::string> &tokens, unsigned 
 		// additions backwards-compatible.
 	}
 
-	// Uppercase identity's callsign portion (before the '-') and modules.
-	// The keyfile / tls: / servercert: values are left as-is.
+	// Uppercase identity and modules. The keyfile / tls: / servercert:
+	// values are left as-is.
 	ToUpper(identity);
 	ToUpper(modules);
 
 	if (identity.empty() || modules.empty())
 	{
 		std::cerr << m_Filename << " line #" << line_no
-		          << ": TLS entry missing identity or modules" << std::endl;
+		          << ": TLS entry missing name or modules" << std::endl;
 		return;
 	}
+	for (char m : modules)
+	{
+		if (m < 'A' || m > 'Z')
+		{
+			std::cerr << m_Filename << " line #" << line_no
+			          << ": TLS modules '" << modules << "' must be letters A-Z" << std::endl;
+			return;
+		}
+	}
 
-	// Basic identity shape: at least one letter/digit, a single '-', at
-	// least one letter/digit after. Callers still validate the full form
-	// on the wire in TLSBuildBirth / ParseBirth.
-	auto dash = identity.find('-');
-	if (dash == std::string::npos || dash == 0 || dash == identity.size() - 1)
+	if (!keyfile.empty() && tls_endpoint.empty() && !TLSIsBareCallsign(identity))
 	{
 		std::cerr << m_Filename << " line #" << line_no
-		          << ": TLS identity '" << identity
-		          << "' is not in 'callsign-module' shape" << std::endl;
+		          << ": TLS key registration '" << identity
+		          << "' must be the operator's bare callsign (e.g. W5GGW), matching"
+		             " the certificate's CN; nodes add their module when they connect"
+		          << std::endl;
+		return;
+	}
+	if (!tls_endpoint.empty() && keyfile.empty() && modules.size() != 1)
+	{
+		std::cerr << m_Filename << " line #" << line_no
+		          << ": TLS target '" << identity << "' must assert exactly one module"
+		             " (got '" << modules << "')" << std::endl;
 		return;
 	}
 

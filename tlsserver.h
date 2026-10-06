@@ -26,11 +26,14 @@
 // One CTLSSession per connected peer runs on its own thread. The main
 // accept thread does nothing but accept() and spawn.
 //
-// Peer identity resolution: the server holds a snapshot of the peer registry
-// - a map from callsign-<module> string to keyfile path - loaded from mrefd's
-// mrefd.interlink parser. When a BIRTH arrives, the server looks up the
-// identity string, loads the pubkey from the associated file, and verifies
-// the signature. Failure is logged and the session dropped.
+// Peer identity resolution: the key decides. The server requires a client
+// certificate in the TLS handshake and looks it up by SPKI fingerprint in a
+// registry snapshot built from mrefd.interlink. The registered certificate's
+// Subject CN is the operator's callsign; the BIRTH names that same callsign
+// plus the ONE module this node is asserting, and is signed with the same
+// key. The peer is installed as "<CN>-<module>". A peer can choose which of
+// its permitted modules it links, but never what callsign it is. Failure is
+// logged, a REJECT sent, and the session dropped.
 
 #pragma once
 
@@ -49,14 +52,16 @@
 #include "birth.h"
 #include "tlssession.h"
 
-// Registry entry: for identity "W5GGW-B", the keyfile path is
-// "/etc/mrefd/tls/peers/W5GGW-B.pub.pem" and the requested modules are
-// "BCD". Loaded from mrefd.interlink at startup and hot-reloaded when the
-// file changes.
+// Registry entry for one operator's key, e.g. from the interlink line
+//     W5GGW  BCD  key:/etc/mrefd/tls/peers/W5GGW.pub.pem
+// Indexed by `fingerprint`. Loaded from mrefd.interlink at startup and
+// hot-reloaded when the file changes.
 struct STLSPeerRegistration
 {
+	std::string callsign;     // Subject CN of the registered cert, e.g. "W5GGW"
+	std::string fingerprint;  // SPKI SHA-256 (base64) of the registered cert
 	std::string keyfile;      // filesystem path to peer's cert (PEM)
-	std::string modules;      // shared modules from the interlink entry
+	std::string modules;      // modules this key's nodes may assert, e.g. "BCD"
 };
 
 // Callback fired after a peer's BIRTH is verified. The reflector implements
@@ -91,10 +96,10 @@ public:
 	// (0.0.0.0, ::, 44.61.17.20, ...). Returns false on failure.
 	bool Listen(const std::string &bind_addr, uint16_t port);
 
-	// Replace the peer registry snapshot. Safe to call at any time from
-	// the interlink hot-reload path; per-peer worker threads use only
-	// the identity they were authenticated with at BIRTH time, so an
-	// in-flight session is unaffected by a registry update.
+	// Replace the peer registry snapshot, keyed by SPKI fingerprint. Safe to
+	// call at any time from the interlink hot-reload path; per-peer worker
+	// threads use only the identity they were authenticated with at BIRTH
+	// time, so an in-flight session is unaffected by a registry update.
 	void SetRegistry(std::map<std::string, STLSPeerRegistration> registry);
 
 	// Register the peer-authenticated callback. Must be set before Start().
@@ -120,10 +125,10 @@ private:
 	void AcceptLoop();
 	void HandleConnection(int fd);
 
-	// Look up an identity in the current registry snapshot. Returns nullptr
-	// if the identity isn't registered. Holds m_registry_mutex.
+	// Look up a key fingerprint in the current registry snapshot. Returns
+	// nullptr if the key isn't registered. Holds m_registry_mutex.
 	std::shared_ptr<STLSPeerRegistration>
-	FindRegistration(const std::string &identity);
+	FindRegistration(const std::string &fingerprint);
 
 	SSL_CTX                  *m_ctx = nullptr;   // owned
 	int                       m_listen_fd = -1;

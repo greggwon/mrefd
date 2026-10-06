@@ -19,6 +19,7 @@
 // ----------------------------------------------------------------------------
 
 #include "tlssession.h"
+#include "birth.h"
 #include "framing.h"
 
 #include <arpa/inet.h>
@@ -226,6 +227,20 @@ bool CTLSSession::WriteFrame(const std::vector<uint8_t> &payload)
 		return false;
 
 	return SSLWriteAll(m_ssl, frame.data(), frame.size());
+}
+
+// ---------------------------------------------------------------------------
+// peer certificate
+// ---------------------------------------------------------------------------
+bool CTLSSession::GetPeerCertIdentity(std::string &callsign,
+                                      std::string &spki_fingerprint) const
+{
+	if (m_ssl == nullptr) return false;
+	X509 *cert = SSL_get1_peer_certificate(m_ssl);
+	if (cert == nullptr) return false;
+	bool ok = TLSCertIdentity(cert, callsign, spki_fingerprint);
+	X509_free(cert);
+	return ok;
 }
 
 // ---------------------------------------------------------------------------

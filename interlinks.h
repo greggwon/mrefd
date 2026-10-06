@@ -37,25 +37,25 @@ using InterlinkMap = std::unordered_map<std::string, std::unique_ptr<CInterlink>
 // list from the UDP map (m_Imap) so the existing UDP path is untouched by
 // TLS lines; consumed by CTLSServer / CTLSClient at reflector startup.
 //
-// Home-side entry: identifies a peer whose incoming TLS connection this
-// reflector will accept, verifying the peer's BIRTH signature against
-// the referenced keyfile.
-//     Example: "W5GGW-B  BCD  key:/etc/mrefd/tls/peers/W5GGW-B.pub.pem"
+// Home-side entry: registers one operator's key. Any node presenting that
+// key may connect, asserting one of the listed modules, and is named
+// "<callsign>-<module>". The callsign must be the cert's Subject CN.
+//     Example: "W5GGW  BCD  key:/etc/mrefd/tls/peers/W5GGW.pub.pem"
 struct STLSPeerReg
 {
-	std::string identity;    // callsign-module, e.g. "W5GGW-B"
-	std::string modules;     // shared modules, e.g. "BCD"
-	std::string keyfile;     // filesystem path to the peer's cert (PEM)
+	std::string identity;    // operator's bare callsign, e.g. "W5GGW"
+	std::string modules;     // modules its nodes may assert, e.g. "BCD"
+	std::string keyfile;     // filesystem path to the operator's cert (PEM)
 };
 
 // Field-side entry: this reflector will initiate an outbound TLS
-// connection to `host:port`, present its own client cert, and expect the
-// server cert to match `servercert`.
-//     Example: "M17-HOM  BCD  tls:home.example.org:17000  servercert:/etc/mrefd/home.pem"
+// connection to `host:port`, present its own client cert, expect the server
+// cert to match `servercert`, and assert ONE module for this link.
+//     Example: "M17-HOM  B  tls:home.example.org:17000  servercert:/etc/mrefd/home.pem"
 struct STLSClientTarget
 {
-	std::string identity;    // callsign-module of the remote reflector
-	std::string modules;     // shared modules
+	std::string identity;    // name of the remote reflector, e.g. "M17-HOM"
+	std::string modules;     // the single module this node asserts, e.g. "B"
 	std::string host;        // hostname or IPv4/IPv6 literal
 	uint16_t    port = 17000;
 	std::string servercert;  // pinned server cert file (PEM)

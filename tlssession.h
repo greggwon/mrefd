@@ -83,6 +83,10 @@ public:
 	const std::string &GetPeerAddress() const { return m_peer_addr; }
 	uint16_t GetPeerPort() const  { return m_peer_port; }
 
+	// Callsign (Subject CN) and SPKI SHA-256 fingerprint of the certificate
+	// the peer presented in the handshake. False if none was presented.
+	bool GetPeerCertIdentity(std::string &callsign, std::string &spki_fingerprint) const;
+
 	// Identity is assigned by the caller after a BIRTH exchange, so the
 	// dashboard / logging code can name a session by its authenticated
 	// identity rather than by socket address.

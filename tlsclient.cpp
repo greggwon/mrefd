@@ -19,6 +19,7 @@
 // ----------------------------------------------------------------------------
 
 #include "tlsclient.h"
+#include "birth.h"
 #include "framing.h"
 
 #include <arpa/inet.h>
@@ -136,9 +137,9 @@ bool CTLSClient::Init(const std::string &client_cert_path,
 	}
 	SSL_CTX_set_min_proto_version(m_ctx, TLS1_2_VERSION);
 
-	// Present the client cert during TLS handshake. This is not what
-	// authenticates the peer (that's BIRTH), but some servers can log it
-	// and it costs nothing to send.
+	// Present the client cert during the TLS handshake. The hub identifies
+	// this node by the key in it; BIRTH then proves possession of that key
+	// and names the module being asserted.
 	if (SSL_CTX_use_certificate_file(m_ctx, client_cert_path.c_str(),
 	                                 SSL_FILETYPE_PEM) <= 0)
 	{
@@ -163,6 +164,18 @@ bool CTLSClient::Init(const std::string &client_cert_path,
 		return false;
 	}
 	SSL_CTX_set_verify(m_ctx, SSL_VERIFY_PEER, nullptr);
+
+	// Our callsign is whatever our certificate says; the module is chosen
+	// per connection by the caller.
+	std::string fingerprint;
+	if (!TLSCertIdentityFromFile(client_cert_path, m_callsign, fingerprint)
+	    || !TLSIsBareCallsign(m_callsign))
+	{
+		std::cerr << "TLS client: certificate " << client_cert_path
+		          << " must have the operator's bare callsign as its CN (got '"
+		          << m_callsign << "')" << std::endl;
+		return false;
+	}
 
 	m_client_key_path = client_key_path;
 	return true;

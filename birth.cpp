@@ -21,6 +21,7 @@
 #include "birth.h"
 #include "framing.h"
 
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -29,6 +30,7 @@
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
+#include <openssl/sha.h>
 #include <openssl/x509.h>
 
 // ---------------------------------------------------------------------------
@@ -285,4 +287,79 @@ EBirthError TLSVerifyBirth(const SBirthMsg &msg,
 	if (rc == 1)
 		return EBirthError::Ok;
 	return EBirthError::SignatureInvalid;
+}
+
+// ---------------------------------------------------------------------------
+// Certificate identity
+// ---------------------------------------------------------------------------
+bool TLSCertIdentity(const void *x509,
+                     std::string &callsign,
+                     std::string &spki_fingerprint)
+{
+	X509 *cert = const_cast<X509 *>(static_cast<const X509 *>(x509));
+	if (cert == nullptr)
+		return false;
+
+	// Subject CN.
+	char cn[128] = {0};
+	X509_NAME *subj = X509_get_subject_name(cert);
+	if (subj == nullptr
+	    || X509_NAME_get_text_by_NID(subj, NID_commonName, cn, sizeof(cn)) <= 0)
+		return false;
+	callsign = cn;
+	for (auto &c : callsign)
+		c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+
+	// SHA-256 over the DER SubjectPublicKeyInfo, base64-encoded. Matches
+	//   openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER
+	//     | openssl dgst -sha256 -binary | openssl base64
+	unsigned char *der = nullptr;
+	int der_len = i2d_PUBKEY(X509_get0_pubkey(cert), &der);
+	if (der_len <= 0)
+		return false;
+	unsigned char digest[SHA256_DIGEST_LENGTH];
+	SHA256(der, static_cast<size_t>(der_len), digest);
+	OPENSSL_free(der);
+
+	unsigned char b64[4 * ((SHA256_DIGEST_LENGTH + 2) / 3) + 1] = {0};
+	EVP_EncodeBlock(b64, digest, SHA256_DIGEST_LENGTH);
+	spki_fingerprint = reinterpret_cast<char *>(b64);
+	return true;
+}
+
+bool TLSCertIdentityFromFile(const std::string &cert_pem_path,
+                             std::string &callsign,
+                             std::string &spki_fingerprint)
+{
+	FilePtr fp(fopen(cert_pem_path.c_str(), "r"));
+	if (!fp)
+		return false;
+	X509Ptr cert(PEM_read_X509(fp.get(), nullptr, nullptr, nullptr));
+	if (!cert)
+		return false;
+	return TLSCertIdentity(cert.get(), callsign, spki_fingerprint);
+}
+
+bool TLSIsBareCallsign(const std::string &cs)
+{
+	if (cs.size() < 3 || cs.size() > BIRTH_MAX_IDENTITY - 2)
+		return false;
+	for (char c : cs)
+	{
+		if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/'))
+			return false;
+	}
+	return true;
+}
+
+bool TLSSplitIdentity(const std::string &identity,
+                      std::string &callsign,
+                      char &module)
+{
+	auto dash = identity.find('-');
+	if (dash == std::string::npos || dash + 2 != identity.size())
+		return false;
+	callsign = identity.substr(0, dash);
+	module   = identity[dash + 1];
+	return TLSIsBareCallsign(callsign) && module >= 'A' && module <= 'Z';
 }

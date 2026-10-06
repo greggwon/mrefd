@@ -101,8 +101,9 @@ private:
 	struct SClientState
 	{
 		std::unique_ptr<CTLSClient> client;
-		std::string                 identity;
-		std::string                 modules;
+		std::string                 identity;       // the hub's name, from the interlink line
+		std::string                 node_identity;  // ours: "<cert CN>-<module>"
+		std::string                 modules;        // the one module this line asserts
 		std::string                 host;
 		uint16_t                    port = 0;
 	};

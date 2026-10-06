@@ -56,6 +56,23 @@ namespace
 			std::cerr << "TLS " << when << ": " << buf << std::endl;
 		}
 	}
+
+	// Peer certificates are self-signed, so there is no chain to validate.
+	// Trust comes from matching the presented key against the registry
+	// after the handshake; here we only require that one was presented.
+	int AcceptPresentedCert(int, X509_STORE_CTX *)
+	{
+		return 1;
+	}
+
+	void SendReject(CTLSSession &session, uint8_t reason)
+	{
+		std::vector<uint8_t> reject = {
+			static_cast<uint8_t>(EMsgType::Reject),
+			reason,
+		};
+		session.WriteFrame(reject);
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +122,10 @@ bool CTLSServer::Init(const std::string &server_cert_path,
 		std::cerr << "TLS: server private key does not match certificate" << std::endl;
 		return false;
 	}
+	// Every field node must present its operator certificate; the key in it
+	// is what identifies the node.
+	SSL_CTX_set_verify(m_ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
+	                   AcceptPresentedCert);
 	return true;
 }
 
@@ -205,10 +226,10 @@ void CTLSServer::SetRegistry(std::map<std::string, STLSPeerRegistration> registr
 }
 
 std::shared_ptr<STLSPeerRegistration>
-CTLSServer::FindRegistration(const std::string &identity)
+CTLSServer::FindRegistration(const std::string &fingerprint)
 {
 	std::lock_guard<std::mutex> lock(m_registry_mutex);
-	auto it = m_registry.find(identity);
+	auto it = m_registry.find(fingerprint);
 	return (it != m_registry.end()) ? it->second : nullptr;
 }
 
@@ -283,7 +304,9 @@ void CTLSServer::HandleConnection(int fd)
 		return;
 	}
 
-	// Read the BIRTH frame.
+	// Read BIRTH before judging the key, so a REJECT is never sent with the
+	// peer's BIRTH still unread - closing a TLS session with unread input
+	// resets the connection and the peer never sees why it was refused.
 	std::vector<uint8_t> payload;
 	if (!session.ReadFrame(payload))
 	{
@@ -297,58 +320,67 @@ void CTLSServer::HandleConnection(int fd)
 	{
 		std::cerr << "TLS server: BIRTH parse failed (" << static_cast<unsigned>(perr)
 		          << ") from " << session.GetPeerAddress() << std::endl;
+		SendReject(session, 0xFF);
 		return;
 	}
 
-	// Identity lookup.
-	auto reg = FindRegistration(birth.identity);
+	// Who is this? Decided by the key the peer presented, nothing else.
+	std::string cert_callsign, fingerprint;
+	if (!session.GetPeerCertIdentity(cert_callsign, fingerprint))
+	{
+		std::cerr << "TLS server: no usable client certificate from "
+		          << session.GetPeerAddress() << std::endl;
+		SendReject(session, 0x01);
+		return;
+	}
+	auto reg = FindRegistration(fingerprint);
 	if (!reg)
 	{
-		std::cerr << "TLS server: unknown identity '" << birth.identity
-		          << "' from " << session.GetPeerAddress()
-		          << " (not in registry)" << std::endl;
-		// Send a REJECT so the client knows why.
-		std::vector<uint8_t> reject = {
-			static_cast<uint8_t>(EMsgType::Reject),
-			0x01,           // reason code: Unknown identity
-		};
-		session.WriteFrame(reject);
+		std::cerr << "TLS server: unregistered key (CN '" << cert_callsign
+		          << "', fingerprint " << fingerprint << ") from "
+		          << session.GetPeerAddress() << std::endl;
+		SendReject(session, 0x01);
 		return;
 	}
 
-	// Signature + skew check.
+	// BIRTH must be "<registered callsign>-<one module>". The node picks the
+	// module; the callsign has to be the one the key belongs to.
+	std::string birth_callsign;
+	char module = 0;
+	if (!TLSSplitIdentity(birth.identity, birth_callsign, module)
+	    || birth_callsign != reg->callsign)
+	{
+		std::cerr << "TLS server: BIRTH identity '" << birth.identity
+		          << "' does not match key owner '" << reg->callsign
+		          << "-<module>' from " << session.GetPeerAddress() << std::endl;
+		SendReject(session, 0x01);
+		return;
+	}
+
+	// Signature + skew check, against the same registered key.
 	auto verr = TLSVerifyBirth(birth, reg->keyfile, NowMs(), m_ts_skew_seconds);
 	if (verr != EBirthError::Ok)
 	{
 		std::cerr << "TLS server: BIRTH verify failed (" << static_cast<unsigned>(verr)
-		          << ") for identity '" << birth.identity
+		          << ") for '" << birth.identity
 		          << "' from " << session.GetPeerAddress() << std::endl;
-		std::vector<uint8_t> reject = {
-			static_cast<uint8_t>(EMsgType::Reject),
-			// map birth error to REJECT reason code
+		SendReject(session,
 			(verr == EBirthError::TimestampOutOfWindow) ? static_cast<uint8_t>(0x03) :
 			(verr == EBirthError::SignatureInvalid)     ? static_cast<uint8_t>(0x02) :
-			                                              static_cast<uint8_t>(0xFF)
-		};
-		session.WriteFrame(reject);
+			                                              static_cast<uint8_t>(0xFF));
 		return;
 	}
 
-	// Cross-check requested modules against the registration.
-	for (char m : birth.modules)
+	// The asserted module must be the identity's module, and one this key
+	// is permitted to link.
+	if (birth.modules != std::string(1, module)
+	    || reg->modules.find(module) == std::string::npos)
 	{
-		if (reg->modules.find(m) == std::string::npos)
-		{
-			std::cerr << "TLS server: identity '" << birth.identity
-			          << "' requested module '" << m
-			          << "' not in registration (" << reg->modules << ")" << std::endl;
-			std::vector<uint8_t> reject = {
-				static_cast<uint8_t>(EMsgType::Reject),
-				0x04,   // Requested modules not permitted for this identity
-			};
-			session.WriteFrame(reject);
-			return;
-		}
+		std::cerr << "TLS server: '" << birth.identity << "' asserted module(s) '"
+		          << birth.modules << "'; key '" << reg->callsign
+		          << "' may assert one of '" << reg->modules << "'" << std::endl;
+		SendReject(session, 0x04);
+		return;
 	}
 
 	// Success: send ACCEPT.
@@ -361,9 +393,9 @@ void CTLSServer::HandleConnection(int fd)
 	}
 	session.SetIdentity(birth.identity);
 
-	std::cerr << "TLS server: peer '" << birth.identity << "' authenticated from "
+	std::cerr << "TLS server: node '" << birth.identity << "' authenticated from "
 	          << session.GetPeerAddress() << ":" << session.GetPeerPort()
-	          << " modules=" << birth.modules << std::endl;
+	          << " (key " << reg->callsign << ", module " << module << ")" << std::endl;
 
 	// Wrap into a shared_ptr so both the read-loop thread and the
 	// sender-map closure can hold references. From here on the callback

@@ -48,6 +48,9 @@ CTLSInterlinks::~CTLSInterlinks()
 // ---------------------------------------------------------------------------
 namespace
 {
+	// One entry per registered operator key, indexed by SPKI fingerprint.
+	// The callsign on the interlink line must be the certificate's CN, so
+	// the file can't name a key as someone it isn't; mismatches are skipped.
 	std::map<std::string, STLSPeerRegistration>
 	MakeRegistryFromInterlinks(const std::vector<STLSPeerReg> &regs)
 	{
@@ -55,9 +58,27 @@ namespace
 		for (const auto &r : regs)
 		{
 			STLSPeerRegistration entry;
+			if (!TLSCertIdentityFromFile(r.keyfile, entry.callsign, entry.fingerprint))
+			{
+				std::cerr << "TLS interlinks: can't read certificate " << r.keyfile
+				          << " for '" << r.identity << "'; skipping" << std::endl;
+				continue;
+			}
+			if (entry.callsign != r.identity)
+			{
+				std::cerr << "TLS interlinks: " << r.keyfile << " belongs to '"
+				          << entry.callsign << "', but the interlink line says '"
+				          << r.identity << "'; skipping" << std::endl;
+				continue;
+			}
 			entry.keyfile = r.keyfile;
 			entry.modules = r.modules;
-			out.emplace(r.identity, std::move(entry));
+			if (!out.emplace(entry.fingerprint, entry).second)
+			{
+				std::cerr << "TLS interlinks: key for '" << r.identity
+				          << "' is registered more than once; using the first line"
+				          << std::endl;
+			}
 		}
 		return out;
 	}
@@ -100,7 +121,9 @@ bool CTLSInterlinks::Init(const std::string &server_cert_path,
 			else
 			{
 				m_server->SetTimestampSkew(timestamp_skew_seconds);
-				m_server->SetRegistry(MakeRegistryFromInterlinks(peer_regs));
+				auto registry = MakeRegistryFromInterlinks(peer_regs);
+				const size_t registered = registry.size();
+				m_server->SetRegistry(std::move(registry));
 				m_server->SetAuthenticatedCallback(
 					[this](std::shared_ptr<CTLSSession> s, SBirthMsg b) {
 						this->OnPeerAuthenticated(std::move(s), std::move(b));
@@ -119,7 +142,7 @@ bool CTLSInterlinks::Init(const std::string &server_cert_path,
 				{
 					m_server_running = true;
 					std::cout << "TLS interlinks: listening for "
-					          << peer_regs.size() << " registered peer(s)"
+					          << registered << " registered operator key(s)"
 					          << std::endl;
 				}
 			}
@@ -159,6 +182,9 @@ bool CTLSInterlinks::Init(const std::string &server_cert_path,
 					          << t.identity << "'" << std::endl;
 					continue;
 				}
+				// This node's name at the hub: our certificate's callsign
+				// plus the one module this line asserts.
+				st.node_identity = st.client->GetCallsign() + "-" + t.modules;
 				m_client_targets.push_back(std::move(st));
 			}
 
@@ -270,11 +296,12 @@ void CTLSInterlinks::ClientRetryLoop(size_t idx)
 	{
 		CTLSSession session;
 		auto rc = st.client->Connect(st.host, st.port,
-		                             st.identity, st.modules, session);
+		                             st.node_identity, st.modules, session);
 		if (rc == ETLSConnectResult::Ok)
 		{
 			std::cout << "TLS interlinks: connected to '" << st.identity
-			          << "' at " << st.host << ":" << st.port << std::endl;
+			          << "' at " << st.host << ":" << st.port
+			          << " as '" << st.node_identity << "'" << std::endl;
 			backoff = 2s;
 
 			// Wrap in shared_ptr so the sender-map closure and the read

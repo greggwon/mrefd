@@ -64,11 +64,11 @@ constexpr size_t BIRTH_MAX_MODULES     = 26;   // A..Z max
 
 struct SBirthMsg
 {
-	std::string          identity;      // e.g. "W5GGW-B"
+	std::string          identity;      // "<cert CN>-<module>", e.g. "W5GGW-B"
 	uint64_t             timestamp_ms;  // ms since Unix epoch
 	std::vector<uint8_t> nonce;         // size BIRTH_NONCE_BYTES
 	std::vector<uint8_t> signature;     // size BIRTH_ED25519_SIG_LEN
-	std::string          modules;       // requested shared modules
+	std::string          modules;       // the one module asserted, e.g. "B"
 };
 
 enum class EBirthError : uint8_t
@@ -124,3 +124,39 @@ EBirthError TLSVerifyBirth(const SBirthMsg &msg,
 // Fill `out` with BIRTH_NONCE_BYTES of cryptographically random data.
 // Returns true on success. Wraps OpenSSL's RAND_bytes.
 bool TLSMakeNonce(std::vector<uint8_t> &out);
+
+// ---------------------------------------------------------------------------
+// Certificate identity
+//
+// The key decides who a peer is. An operator holds ONE certificate whose
+// Subject CN is their bare callsign (e.g. "W5GGW"); every node they run
+// presents that same certificate and asserts, per connection, the single
+// module it is linking - the way a radio picks a module when connecting to a
+// reflector. The node's name on the far end is therefore "<CN>-<module>"
+// (e.g. "W5GGW-B"), where the callsign half always comes from the
+// certificate and never from what the peer claims.
+// ---------------------------------------------------------------------------
+
+// Read the Subject CN and the SPKI SHA-256 fingerprint (base64, the same
+// form scripts/tls-genkey.sh prints) from a PEM X.509 certificate file.
+// Returns false if the file can't be read or has no CN.
+bool TLSCertIdentityFromFile(const std::string &cert_pem_path,
+                             std::string &callsign,
+                             std::string &spki_fingerprint);
+
+// Same, for an in-memory certificate (e.g. the one a peer presented in the
+// TLS handshake). `x509` is an X509*; typed void* so callers that don't
+// otherwise include OpenSSL headers can use this declaration.
+bool TLSCertIdentity(const void *x509,
+                     std::string &callsign,
+                     std::string &spki_fingerprint);
+
+// True if `cs` is a bare callsign: A-Z, 0-9 and '/', at least 3 chars, no
+// '-'. Expects upper case.
+bool TLSIsBareCallsign(const std::string &cs);
+
+// Split a BIRTH identity "<callsign>-<module>" into its parts. Returns false
+// unless it is exactly a bare callsign, one '-', and one letter A-Z.
+bool TLSSplitIdentity(const std::string &identity,
+                      std::string &callsign,
+                      char &module);

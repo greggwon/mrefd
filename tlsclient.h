@@ -72,13 +72,17 @@ public:
 	          const std::string &client_key_path,
 	          const std::string &server_cert_path);
 
+	// This node's callsign: the Subject CN of the client certificate loaded
+	// by Init(). Valid after a successful Init().
+	const std::string &GetCallsign() const { return m_callsign; }
+
 	// Dial the server, negotiate TLS, and send a signed BIRTH.
 	// Returns Ok on ACCEPT; a specific error otherwise.
 	//
 	//   host       - hostname or IPv4/IPv6 literal
 	//   port       - TCP port (typically 17000)
-	//   identity   - callsign-<module> to authenticate as
-	//   modules    - modules string to request in the BIRTH
+	//   identity   - "<GetCallsign()>-<module>" to authenticate as
+	//   modules    - the one module being asserted, e.g. "B"
 	//   out_session- on success, the caller receives ownership of the
 	//                authenticated session for post-BIRTH traffic.
 	ETLSConnectResult Connect(const std::string &host,
@@ -90,4 +94,5 @@ public:
 private:
 	SSL_CTX    *m_ctx = nullptr;              // owned
 	std::string m_client_key_path;            // for signing BIRTH
+	std::string m_callsign;                   // client cert's Subject CN
 };
